@@ -1,16 +1,3 @@
-# ---
-# jupyter:
-#   jupytext:
-#     text_representation:
-#       extension: .py
-#       format_name: light
-#       format_version: '1.5'
-#       jupytext_version: 1.15.0
-#   kernelspec:
-#     display_name: Python 3 (ipykernel)
-#     language: python
-#     name: python3
-# ---
 
 import numpy as np
 import torch
@@ -20,7 +7,6 @@ import scipy
 import random
 
 
-# ## VAE
 
 class vae_simple_dense(nn.Module):
     """
@@ -164,6 +150,13 @@ class vae_simple(nn.Module):
     def forward(self, x):
         z, zm, zs = self.encoder(x)
         return self.decoder(z), zm, zs
+    
+    def loss_function(self, recon_x, x, mu, logvar, kl_weight):
+        #BCE = F.binary_cross_entropy(recon_x, x, reduction='sum')
+        BCE = F.mse_loss(recon_x, x, reduction='sum')
+        KLD = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp())
+        total_KLD = KLD.sum()
+        return BCE + (kl_weight*total_KLD), BCE, total_KLD, KLD
 
 
 class vae_simple_encoder(nn.Module):
@@ -279,21 +272,51 @@ class vae_simple_cnn(nn.Module):
         z = self.encoder(x)
         enc_mu = self.encoder_mu(z)
         enc_std = self.encoder_std(z)
-        enc_out = repara(enc_mu, enc_out)
+        enc_out = self.repara(enc_mu, enc_out)
         
         dec_in = self.dec_input(enc_out)
         return self.decoder(dec_in)
 
 
-# ## WGAN
 
-# +
+
 # GENERATOR
 class generator_simple_dense(nn.Module):
     def __init__(self, gen_layers:list, z_shape:int, img_shape:int, p):
         super().__init__()
         self.gen_layers = gen_layers
         self.gen_input = z_shape
+        self.img_shape = img_shape
+        self.p = p
+        
+        gen = []
+        for l in gen_layers:
+            gen.append(nn.Sequential(
+                nn.Linear(in_features=self.gen_input, out_features=l),
+                nn.BatchNorm1d(l),
+                nn.ReLU(),
+                nn.Dropout(self.p)
+                )
+            )
+            self.gen_input = l
+            
+        gen.append(nn.Sequential(
+            nn.Linear(in_features=self.gen_input, out_features=self.img_shape),
+            #nn.ReLU()
+            #nn.Sigmoid()
+            )
+        )
+                   
+        self.generat = nn.Sequential(*gen)
+
+    def forward(self, x):
+        return self.generat(x)
+                   
+class c_generator_simple_dense(nn.Module):
+    def __init__(self, gen_layers:list, z_shape:int, img_shape:int, p):
+        super().__init__()
+        self.gen_layers = gen_layers
+        self.gen_input = z_shape + 1
         self.img_shape = img_shape
         self.p = p
         
@@ -317,7 +340,8 @@ class generator_simple_dense(nn.Module):
                    
         self.generat = nn.Sequential(*gen)
 
-    def forward(self, x):
+    def forward(self, x, y):
+        x = torch.cat([x, y], 1)
         return self.generat(x)
                    
 # DISCRIMINATOR    
@@ -326,6 +350,70 @@ class discriminator_simple_dense(nn.Module):
         super().__init__()
         self.disc_layers = disc_layers
         self.disc_input = img_shape
+        self.p = p
+
+    
+        disc = []
+        for l in disc_layers:
+            disc.append(nn.Sequential(
+                nn.Linear(in_features=self.disc_input, out_features=l),
+                nn.BatchNorm1d(l),
+                nn.ReLU(),
+                nn.Dropout(self.p)
+                )
+            )
+            self.disc_input = l
+        # Add logits output
+        disc.append(nn.Sequential(
+            nn.Linear(in_features=self.disc_input, out_features=1)
+            ,nn.Sigmoid()
+            )
+        )
+        self.discrim = nn.Sequential(*disc)
+        
+    def forward(self, x):
+        return self.discrim(x)
+
+class discriminator_simple_dense_cls(nn.Module):
+    def __init__(self, disc_layers:list, img_shape:int, p, n_classes):
+        super().__init__()
+        self.disc_layers = disc_layers
+        self.disc_input = img_shape
+        self.p = p
+
+    
+        disc = []
+        for l in disc_layers:
+            disc.append(nn.Sequential(
+                nn.Linear(in_features=self.disc_input, out_features=l),
+                nn.BatchNorm1d(l),
+                nn.ReLU(),
+                nn.Dropout(self.p)
+                )
+            )
+            self.disc_input = l
+        # Add logits output
+        disc.append(nn.Sequential(
+            nn.Linear(in_features=self.disc_input, out_features=1)
+            ,nn.Sigmoid()
+            )
+        )
+        self.discrim = nn.Sequential(*disc)
+        self.aux_classifier = nn.Sequential(
+            nn.Linear(in_features=img_shape, out_features=128),
+            nn.ReLU(),
+            nn.Linear(in_features=128, out_features=n_classes),
+            nn.Softmax(dim=1)
+        )
+        
+    def forward(self, x):
+        return self.discrim(x), self.aux_classifier(x)
+
+class c_discriminator_simple_dense(nn.Module):
+    def __init__(self, disc_layers:list, img_shape:int, p):
+        super().__init__()
+        self.disc_layers = disc_layers
+        self.disc_input = img_shape + 1
         self.p = p
 
     
@@ -348,12 +436,9 @@ class discriminator_simple_dense(nn.Module):
         )
         self.discrim = nn.Sequential(*disc)
         
-    def forward(self, x):
+    def forward(self, x, y):
+        x = torch.cat([x, y], 1)
         return self.discrim(x)
-        
-        
-# -
-
 # ## Conditional VAE
 
 class conditional_simple_vae(nn.Module):
@@ -519,6 +604,14 @@ class cvae_simple(nn.Module):
     def forward(self, x, conditional_data):
         z, zm, zs = self.encoder(x, conditional_data)
         return self.decoder(z, conditional_data), zm, zs
+    
+    def loss_function(self, recon_x, x, mu, logvar, kl_weight):
+        #BCE = F.binary_cross_entropy(recon_x, x, reduction='sum')
+        BCE = F.mse_loss(recon_x, x, reduction='sum')
+        KLD = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp())
+        total_KLD = KLD.sum()
+        return BCE + (kl_weight*total_KLD), BCE, total_KLD, KLD
+
 
 
 # ## Data Loader
